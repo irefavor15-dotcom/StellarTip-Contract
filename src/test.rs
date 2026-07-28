@@ -1804,3 +1804,391 @@ fn test_rebasing_token_wipeout_unregister_fails() {
     // protective rather than harmful.
     t.tip_client().unregister(&alice);
 }
+
+// ---------------------------------------------------------------------------
+// Gas profile assertions (issue #107)
+// ---------------------------------------------------------------------------
+//
+// These tests snapshot the host's CPU-instruction budget before and after
+// a single contract call so we can assert an upper bound on the hot-path
+// cost.  If a refactor accidentally adds a 50 % regression, the assertion
+// will fail at CI time rather than being discovered in production.
+//
+// Each test builds a unique, isolated `Env` so that setup instructions do
+// not leak into the measurement window.  The budget is read *immediately*
+// before and after the call under test; view functions, event iteration and
+// diagnostics executed after the measurement are deliberately excluded.
+//
+// Thresholds were bootstrapped by running the tests on a known-good commit
+// and adding ~20 % headroom.  When the Soroban host cost model changes with
+// a protocol upgrade these numbers may need bumping — the assertion message
+// prints the actual count to make tuning straightforward.
+
+/// Thin helper so individual gas tests don't repeat the ledger boilerplate.
+fn gas_test_env() -> Env {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set(LedgerInfo {
+        timestamp: 1000,
+        protocol_version: 22,
+        sequence_number: 100,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_persistent_entry_ttl: 10,
+        max_entry_ttl: 1_000_000,
+        min_temp_entry_ttl: 10,
+    });
+    env
+}
+
+/// Return the current CPU-instruction consumption.
+fn cpu(env: &Env) -> u64 {
+    env.budget().cpu_instruction_cost()
+}
+
+/// Max CPU instructions allowed for a single `tip()` call.  The fee-path
+/// is the worst-case envelope because it includes an extra SAC `transfer()`
+/// to the fee recipient.
+///
+/// Baseline measured at ~550 531 CPU insns (fee path); constant includes
+/// ~15 % headroom for minor SDK / host cost-model changes.
+const GAS_TIP_MAX: u64 = 635_000;
+
+/// Max CPU instructions allowed for a single `withdraw()` partial call.
+///
+/// Baseline measured at ~306 673 CPU insns; constant includes ~15 %
+/// headroom.
+const GAS_WITHDRAW_PARTIAL_MAX: u64 = 355_000;
+
+/// Max CPU instructions allowed for a single `withdraw()` full call (the
+/// map-removal path inside `CreatorTokens` is more expensive).
+///
+/// Baseline measured at ~310 671 CPU insns; constant includes ~15 %
+/// headroom.
+const GAS_WITHDRAW_FULL_MAX: u64 = 360_000;
+
+/// Max CPU instructions allowed for a single `register()` call.
+///
+/// Baseline measured at ~172 938 CPU insns; constant includes ~15 %
+/// headroom.
+const GAS_REGISTER_MAX: u64 = 200_000;
+
+/// Max CPU instructions allowed for a single `update_profile()` call.
+///
+/// Baseline measured at ~186 054 CPU insns; constant includes ~15 %
+/// headroom.
+const GAS_UPDATE_PROFILE_MAX: u64 = 215_000;
+
+/// Max CPU instructions allowed for a single `unregister()` call (no
+/// balance, single-creator path).
+///
+/// Baseline measured at ~191 242 CPU insns; constant includes ~15 %
+/// headroom.
+const GAS_UNREGISTER_MAX: u64 = 220_000;
+
+/// Max CPU instructions allowed for a single `init()` call.
+///
+/// Baseline measured at ~84 634 CPU insns; constant includes ~15 %
+/// headroom.
+const GAS_INIT_MAX: u64 = 100_000;
+
+#[test]
+fn gas_tip_no_fee() {
+    let env = gas_test_env();
+
+    // -- deploy & initialise --------------------------------------------------
+    let admin = Address::generate(&env);
+    let fee_recipient = Address::generate(&env);
+    let contract_id = env.register_contract(None, TipContract);
+    let client = crate::TipContractClient::new(&env, &contract_id);
+
+    client.init(
+        &admin,
+        &fee_recipient,
+        &0u32, // no fee
+        &crate::DEFAULT_MAX_CREATORS,
+        &crate::DEFAULT_MAX_TIPS_PER_CREATOR,
+        &crate::DEFAULT_MIN_TIP_AMOUNT,
+    );
+
+    // -- register a creator ---------------------------------------------------
+    let creator = Address::generate(&env);
+    client.register(&creator, &Symbol::new(&env, "creator"), &s(&env, "Creator"), &s(&env, ""));
+
+    // -- fund the tipper ------------------------------------------------------
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_id = token_contract.address();
+    let sac = StellarAssetClient::new(&env, &token_id);
+    let tipper = Address::generate(&env);
+    sac.mint(&tipper, &10_000);
+
+    // -- measure tip() --------------------------------------------------------
+    let before = cpu(&env);
+    let idx = client.tip(&tipper, &creator, &token_id, &500, &s(&env, "🚀"));
+    let after = cpu(&env);
+    let used = after - before;
+
+    assert_eq!(idx, 0, "first tip index must be 0");
+    assert_eq!(client.get_balance(&creator, &token_id), 500);
+    assert!(used <= GAS_TIP_MAX, "tip() consumed {used} CPU insns, limit is {GAS_TIP_MAX}");
+}
+
+#[test]
+fn gas_tip_with_fee() {
+    let env = gas_test_env();
+
+    let admin = Address::generate(&env);
+    let fee_recipient = Address::generate(&env);
+    let contract_id = env.register_contract(None, TipContract);
+    let client = crate::TipContractClient::new(&env, &contract_id);
+
+    // 5 % fee exercises the fee-split branch inside tip().
+    client.init(
+        &admin,
+        &fee_recipient,
+        &500u32,
+        &crate::DEFAULT_MAX_CREATORS,
+        &crate::DEFAULT_MAX_TIPS_PER_CREATOR,
+        &crate::DEFAULT_MIN_TIP_AMOUNT,
+    );
+
+    let creator = Address::generate(&env);
+    client.register(&creator, &Symbol::new(&env, "creator"), &s(&env, "Creator"), &s(&env, ""));
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_id = token_contract.address();
+    let sac = StellarAssetClient::new(&env, &token_id);
+    let tipper = Address::generate(&env);
+    sac.mint(&tipper, &10_000);
+
+    // The fee path is the worst-case envelope for tip() — it includes an
+    // extra SAC transfer() to the fee recipient on top of the no-fee path.
+    let before = cpu(&env);
+    let idx = client.tip(&tipper, &creator, &token_id, &1_000, &s(&env, "💡"));
+    let after = cpu(&env);
+    let used = after - before;
+
+    assert_eq!(idx, 0);
+    // 5 % fee = 50, creator gets 950.
+    assert_eq!(client.get_balance(&creator, &token_id), 950);
+    assert!(
+        used <= GAS_TIP_MAX,
+        "tip() (with fee) consumed {used} CPU insns, limit is {GAS_TIP_MAX}"
+    );
+}
+
+#[test]
+fn gas_withdraw_partial() {
+    let env = gas_test_env();
+
+    let admin = Address::generate(&env);
+    let fee_recipient = Address::generate(&env);
+    let contract_id = env.register_contract(None, TipContract);
+    let client = crate::TipContractClient::new(&env, &contract_id);
+
+    client.init(
+        &admin,
+        &fee_recipient,
+        &0u32,
+        &crate::DEFAULT_MAX_CREATORS,
+        &crate::DEFAULT_MAX_TIPS_PER_CREATOR,
+        &crate::DEFAULT_MIN_TIP_AMOUNT,
+    );
+
+    let creator = Address::generate(&env);
+    client.register(&creator, &Symbol::new(&env, "creator"), &s(&env, "Creator"), &s(&env, ""));
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_id = token_contract.address();
+    let sac = StellarAssetClient::new(&env, &token_id);
+    let tipper = Address::generate(&env);
+    sac.mint(&tipper, &10_000);
+    client.tip(&tipper, &creator, &token_id, &1_000, &s(&env, ""));
+
+    // Measure a partial withdrawal (balance stays > 0 → map entry stays).
+    let before = cpu(&env);
+    client.withdraw(&creator, &token_id, &400);
+    let after = cpu(&env);
+    let used = after - before;
+
+    assert_eq!(client.get_balance(&creator, &token_id), 600);
+    assert!(
+        used <= GAS_WITHDRAW_PARTIAL_MAX,
+        "withdraw() consumed {used} CPU insns, limit is {GAS_WITHDRAW_PARTIAL_MAX}"
+    );
+}
+
+#[test]
+fn gas_withdraw_full() {
+    let env = gas_test_env();
+
+    let admin = Address::generate(&env);
+    let fee_recipient = Address::generate(&env);
+    let contract_id = env.register_contract(None, TipContract);
+    let client = crate::TipContractClient::new(&env, &contract_id);
+
+    client.init(
+        &admin,
+        &fee_recipient,
+        &0u32,
+        &crate::DEFAULT_MAX_CREATORS,
+        &crate::DEFAULT_MAX_TIPS_PER_CREATOR,
+        &crate::DEFAULT_MIN_TIP_AMOUNT,
+    );
+
+    let creator = Address::generate(&env);
+    client.register(&creator, &Symbol::new(&env, "creator"), &s(&env, "Creator"), &s(&env, ""));
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_id = token_contract.address();
+    let sac = StellarAssetClient::new(&env, &token_id);
+    let tipper = Address::generate(&env);
+    sac.mint(&tipper, &10_000);
+    client.tip(&tipper, &creator, &token_id, &500, &s(&env, ""));
+
+    // Full withdrawal exercises the map-removal path in `CreatorTokens`,
+    // which is more expensive than partial withdraw.
+    let before = cpu(&env);
+    client.withdraw(&creator, &token_id, &500);
+    let after = cpu(&env);
+    let used = after - before;
+
+    assert_eq!(client.get_balance(&creator, &token_id), 0);
+    assert_eq!(client.get_all_tokens(&creator).len(), 0);
+    assert!(
+        used <= GAS_WITHDRAW_FULL_MAX,
+        "withdraw() (full) consumed {used} CPU insns, limit is {GAS_WITHDRAW_FULL_MAX}"
+    );
+}
+
+#[test]
+fn gas_register() {
+    let env = gas_test_env();
+
+    let admin = Address::generate(&env);
+    let fee_recipient = Address::generate(&env);
+    let contract_id = env.register_contract(None, TipContract);
+    let client = crate::TipContractClient::new(&env, &contract_id);
+
+    client.init(
+        &admin,
+        &fee_recipient,
+        &0u32,
+        &crate::DEFAULT_MAX_CREATORS,
+        &crate::DEFAULT_MAX_TIPS_PER_CREATOR,
+        &crate::DEFAULT_MIN_TIP_AMOUNT,
+    );
+
+    let creator = Address::generate(&env);
+
+    let before = cpu(&env);
+    client.register(&creator, &Symbol::new(&env, "alice"), &s(&env, "Alice"), &s(&env, "Writer"));
+    let after = cpu(&env);
+    let used = after - before;
+
+    assert!(client.is_creator(&creator));
+    assert_eq!(client.get_creator_count(), 1);
+    assert!(
+        used <= GAS_REGISTER_MAX,
+        "register() consumed {used} CPU insns, limit is {GAS_REGISTER_MAX}"
+    );
+}
+
+#[test]
+fn gas_update_profile() {
+    let env = gas_test_env();
+
+    let admin = Address::generate(&env);
+    let fee_recipient = Address::generate(&env);
+    let contract_id = env.register_contract(None, TipContract);
+    let client = crate::TipContractClient::new(&env, &contract_id);
+
+    client.init(
+        &admin,
+        &fee_recipient,
+        &0u32,
+        &crate::DEFAULT_MAX_CREATORS,
+        &crate::DEFAULT_MAX_TIPS_PER_CREATOR,
+        &crate::DEFAULT_MIN_TIP_AMOUNT,
+    );
+
+    let creator = Address::generate(&env);
+    client.register(&creator, &Symbol::new(&env, "alice"), &s(&env, "Alice"), &s(&env, "Writer"));
+
+    let before = cpu(&env);
+    client.update_profile(&creator, &s(&env, "Alice Updated"), &s(&env, "New bio"));
+    let after = cpu(&env);
+    let used = after - before;
+
+    let profile = client.get_profile(&creator).unwrap();
+    assert_eq!(profile.display_name, s(&env, "Alice Updated"));
+    assert!(
+        used <= GAS_UPDATE_PROFILE_MAX,
+        "update_profile() consumed {used} CPU insns, limit is {GAS_UPDATE_PROFILE_MAX}"
+    );
+}
+
+#[test]
+fn gas_unregister() {
+    let env = gas_test_env();
+
+    let admin = Address::generate(&env);
+    let fee_recipient = Address::generate(&env);
+    let contract_id = env.register_contract(None, TipContract);
+    let client = crate::TipContractClient::new(&env, &contract_id);
+
+    client.init(
+        &admin,
+        &fee_recipient,
+        &0u32,
+        &crate::DEFAULT_MAX_CREATORS,
+        &crate::DEFAULT_MAX_TIPS_PER_CREATOR,
+        &crate::DEFAULT_MIN_TIP_AMOUNT,
+    );
+
+    let creator = Address::generate(&env);
+    client.register(&creator, &Symbol::new(&env, "alice"), &s(&env, "Alice"), &s(&env, ""));
+
+    let before = cpu(&env);
+    client.unregister(&creator);
+    let after = cpu(&env);
+    let used = after - before;
+
+    assert!(!client.is_creator(&creator));
+    assert_eq!(client.get_creator_count(), 0);
+    assert!(
+        used <= GAS_UNREGISTER_MAX,
+        "unregister() consumed {used} CPU insns, limit is {GAS_UNREGISTER_MAX}"
+    );
+}
+
+#[test]
+fn gas_init() {
+    let env = gas_test_env();
+
+    let admin = Address::generate(&env);
+    let fee_recipient = Address::generate(&env);
+    let contract_id = env.register_contract(None, TipContract);
+    let client = crate::TipContractClient::new(&env, &contract_id);
+
+    let before = cpu(&env);
+    client.init(
+        &admin,
+        &fee_recipient,
+        &500u32,
+        &crate::DEFAULT_MAX_CREATORS,
+        &crate::DEFAULT_MAX_TIPS_PER_CREATOR,
+        &crate::DEFAULT_MIN_TIP_AMOUNT,
+    );
+    let after = cpu(&env);
+    let used = after - before;
+
+    assert!(client.get_admin().is_some());
+    assert_eq!(client.get_fee_recipient().unwrap(), fee_recipient);
+    assert_eq!(client.get_fee_percentage(), 500);
+    assert!(used <= GAS_INIT_MAX, "init() consumed {used} CPU insns, limit is {GAS_INIT_MAX}");
+}
