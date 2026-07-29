@@ -102,7 +102,7 @@ proptest! {
         }
 
         for (ci_raw, is_wd, amt) in &ops {
-            let ci = ci_raw % creators.len();
+            let ci = ci_raw % (creators.len() as usize);
             let creator = creators.get(ci as u32).unwrap();
 
             if *is_wd == 0 {
@@ -127,7 +127,7 @@ proptest! {
 
         prop_assert_eq!(
             contract_balance, sum_internal,
-            "conservation violated: contract={contract_balance} sum={sum_internal} fee_bps={fee_bps}"
+            "conservation violated: contract balance mismatch for fee_bps setting"
         );
     }
 
