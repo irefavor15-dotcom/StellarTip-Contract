@@ -2,6 +2,8 @@
 
 extern crate std;
 
+use std::prelude::rust_2021::*;
+
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
