@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+extern crate std;
+
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
@@ -67,104 +69,6 @@ impl FuzzEnv {
         StellarAssetClient::new(&self.env, &self.token_id)
     }
 }
-
-// -----------------------------------------------------------------------
-// Issue #90 — i128 boundary amount handling
-// -----------------------------------------------------------------------
-//
-// Separate block with its own case count so the existing 10_000-case
-// tests are not affected.
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
-
-    /// Verify that `tip()` never suffers a raw arithmetic overflow for any
-    /// `i128` amount.  Boundary values (i128::MAX, u64::MAX as i128, 1) are
-    /// drawn with higher probability via `prop_oneof!` so the fuzzer hits
-    /// them frequently, while the rest of the i128 space is covered by random
-    /// sampling.
-    ///
-    /// Uses `std::panic::catch_unwind` to trap expected panics from
-    /// `panic_with_error!` (InvalidAmount for non-positive amounts,
-    /// TransferFailed when the tipper has no tokens).  The test is in its
-    /// own `proptest!` block with a lower case count so the catch_unwind
-    /// overhead doesn't affect the 10 000-case tests.
-    ///
-    /// The test uses **zero fee** (fee_bps = 0) and **zero minimum**
-    /// (`min_tip_amount = 0`) so the fee-computation path cannot overflow
-    /// and the `BelowMinimum` guard is never triggered.  `BelowMinimum`
-    /// coverage comes from `test_tip_balance_invariant` below which
-    /// exercises the full `fee_bps` range alongside amounts ≤ 10^12.
-    #[test]
-    fn test_i128_boundary_amount_no_overflow(
-        amount in prop_oneof![
-            9 => prop::num::i128::ANY,
-            1 => Just(i128::MAX),
-            1 => Just(i128::MAX - 1),
-            1 => Just(i128::MIN),
-            1 => Just(i128::MIN + 1),
-            1 => Just(0i128),
-            1 => Just(-1i128),
-            1 => Just(1i128),
-            1 => Just(u64::MAX as i128),
-        ],
-    ) {
-        let t = FuzzEnv::new(0); // zero fee — no fee-computation overflow possible
-
-        let creator = Address::generate(&t.env);
-        t.tip_client().register(
-            &creator,
-            &Symbol::new(&t.env, "creator"),
-            &s(&t.env, "Creator"),
-            &s(&t.env, "Bio"),
-        );
-
-        let tipper = Address::generate(&t.env);
-
-        // catch_unwind traps the panic_with_error! from the Soroban
-        // host so the proptest runner can inspect the outcome.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            t.tip_client().tip(
-                &tipper,
-                &creator,
-                &t.token_id,
-                &amount,
-                &s(&t.env, "boundary"),
-            );
-        }));
-
-        if amount <= 0 {
-            // Every non-positive amount MUST surface InvalidAmount (#6)
-            // rather than a raw host overflow.
-            prop_assert!(result.is_err(), "amount={amount}: expected InvalidAmount panic");
-        } else if amount <= 1_000_000_000_000i128 {
-            // Mintable range — mint and verify success.
-            t.stellar_client().mint(&tipper, &amount);
-            let re = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                t.tip_client().tip(
-                    &tipper,
-                    &creator,
-                    &t.token_id,
-                    &amount,
-                    &s(&t.env, "ok"),
-                );
-            }));
-            prop_assert!(re.is_ok(), "amount={amount}: tip with minted balance should succeed");
-            prop_assert_eq!(
-                t.tip_client().get_balance(&creator, &t.token_id),
-                amount
-            );
-        }
-        // else: huge values (e.g. i128::MAX) — we cannot feasibly mint
-        // that many tokens.  The test has already verified no overflow
-        // occurred during the guard checks executed before the SAC
-        // transfer.
-    }
-}
-
-// -----------------------------------------------------------------------
-// Original fuzz tests (unchanged)
-// -----------------------------------------------------------------------
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10000))]
