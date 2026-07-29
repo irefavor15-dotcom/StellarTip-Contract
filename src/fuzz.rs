@@ -117,12 +117,17 @@ proptest! {
         let mut creators: Vec<Address> = Vec::new();
         for i in 0..num_creators {
             let c = Address::generate(&t.env);
-            t.tip_client().register(
-                &c,
-                &Symbol::new(&t.env, &format!("c{}", i)),
-                &s(&t.env, &format!("Creator{}", i)),
-                &s(&t.env, ""),
-            );
+            // Build short symbol from a static list — avoids std::format!
+            // which is unavailable under the crate-level #![no_std].
+            let syms = [
+                Symbol::new(&t.env, "a"),
+                Symbol::new(&t.env, "b"),
+                Symbol::new(&t.env, "c"),
+                Symbol::new(&t.env, "d"),
+                Symbol::new(&t.env, "e"),
+            ];
+            let name = s(&t.env, "C");
+            t.tip_client().register(&c, &syms[i], &name, &s(&t.env, ""));
             creators.push(c);
         }
 
