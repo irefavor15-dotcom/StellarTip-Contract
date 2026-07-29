@@ -48,7 +48,7 @@ impl FuzzEnv {
         let token_id = token_contract.address();
 
         let sac = StellarAssetClient::new(&env, &token_id);
-        sac.mint(&admin, &1_000_000_000_000_000_000); // large amount of tokens
+        sac.mint(&admin, &1_000_000_000_000_000_000);
 
         let t = FuzzEnv { env, contract_id, admin, fee_recipient, token_id };
         t.tip_client().init(&t.admin, &t.fee_recipient, &fee_bps, &0u32, &0u32, &0i128);
@@ -68,22 +68,13 @@ impl FuzzEnv {
     }
 }
 
-// -----------------------------------------------------------------------
-// Issue #90 — i128 boundary amount handling
-// -----------------------------------------------------------------------
-//
-// Separate block with its own case count so the existing 10_000-case
-// tests are not affected.
-
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(ProptestConfig::with_cases(10000))]
 
-    /// Verify that `tip()` never suffers a raw arithmetic overflow for
-    /// positive `i128` amounts up to 10^12.  Values are drawn from the
-    /// Values are drawn from `1..10^12` — the range we can actually mint
-    /// and tip.  Invalid-amount coverage (≤ 0) is provided by
-    /// `test_tip_zero_amount_fails` in `src/test.rs`.  `BelowMinimum`
-    /// coverage comes from `test_tip_balance_invariant` below.
+    // -------------------------------------------------------------------
+    // Issue #90 — i128 boundary amount handling
+    // -------------------------------------------------------------------
+
     #[test]
     fn test_i128_boundary_amount_no_overflow(
         amount in prop_oneof![
@@ -92,7 +83,7 @@ proptest! {
             1 => Just(1_000_000_000_000i128),
         ],
     ) {
-        let t = FuzzEnv::new(0); // zero fee — no fee-computation overflow possible
+        let t = FuzzEnv::new(0);
 
         let creator = Address::generate(&t.env);
         t.tip_client().register(
@@ -104,13 +95,7 @@ proptest! {
 
         let tipper = Address::generate(&t.env);
         t.stellar_client().mint(&tipper, &amount);
-        t.tip_client().tip(
-            &tipper,
-            &creator,
-            &t.token_id,
-            &amount,
-            &s(&t.env, "boundary"),
-        );
+        t.tip_client().tip(&tipper, &creator, &t.token_id, &amount, &s(&t.env, "ok"));
 
         prop_assert_eq!(
             t.tip_client().get_balance(&creator, &t.token_id),
@@ -118,14 +103,6 @@ proptest! {
             "amount={amount}: balance mismatch after tip"
         );
     }
-}
-
-// -----------------------------------------------------------------------
-// Original fuzz tests
-// -----------------------------------------------------------------------
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(10000))]
 
     #[test]
     fn test_tip_balance_invariant(
@@ -142,22 +119,17 @@ proptest! {
 
         let fee_recipient_balance_before = t.token_client().balance(&t.fee_recipient);
 
-        // Tip
         t.tip_client().tip(&tipper, &creator, &t.token_id, &amount, &s(&t.env, "Thanks!"));
 
-        // Verifications
         let fee = (amount * (fee_bps as i128)) / 10000;
         let expected_creator_balance = amount - fee;
 
-        // Verify internal creator balance
         let internal_balance = t.tip_client().get_balance(&creator, &t.token_id);
         prop_assert_eq!(internal_balance, expected_creator_balance);
 
-        // Verify fee recipient received the fee
         let fee_recipient_balance_after = t.token_client().balance(&t.fee_recipient);
         prop_assert_eq!(fee_recipient_balance_after - fee_recipient_balance_before, fee);
 
-        // Verify contract token balance
         let contract_balance = t.token_client().balance(&t.contract_id);
         prop_assert_eq!(contract_balance, expected_creator_balance);
     }
