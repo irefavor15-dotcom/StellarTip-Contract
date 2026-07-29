@@ -96,9 +96,10 @@ proptest! {
     /// `is_withdraw > 0` means withdraw that fraction of the current balance
     /// (clamped to ≥ 1).
     ///
-    /// Uses Soroban's `try_tip()` / `try_withdraw()` methods so failed
-    /// operations (cap exceeded, insufficient balance) return `Err` instead
-    /// of panicking — this plays correctly with the proptest runner.
+    /// Uses regular `tip()` / `withdraw()` (not the `try_` variants, which
+    /// are unavailable in soroban-sdk 21.7.7).  Because caps are unlimited
+    /// (`0`) in `FuzzEnv` and we always mint before tipping, the operations
+    /// always succeed — no `catch_unwind` is needed.
     #[test]
     fn test_token_conservation_invariant(
         fee_bps in 0..10_000u32,
@@ -129,10 +130,11 @@ proptest! {
             let creator = &creators[ci];
 
             if *is_wd == 0 {
-                // Tip: try_tip returns Result — failure is non-fatal.
+                // Tip: we always mint before tipping, and caps are
+                // unlimited (0) in FuzzEnv, so this always succeeds.
                 let tipper = Address::generate(&t.env);
                 t.stellar_client().mint(&tipper, amt);
-                let _ = t.tip_client().try_tip(
+                t.tip_client().tip(
                     &tipper,
                     creator,
                     &t.token_id,
@@ -147,7 +149,7 @@ proptest! {
                     // Use `amt` as a fraction (amt / 100_000_000) of `bal`,
                     // with a floor of 1 so the withdraw is never zero.
                     let wd = (bal * amt / 100_000_000i128).max(1);
-                    let _ = t.tip_client().try_withdraw(creator, &t.token_id, &wd);
+                    t.tip_client().withdraw(creator, &t.token_id, &wd);
                 }
             }
         }
