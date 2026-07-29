@@ -5,7 +5,7 @@ use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token,
     token::StellarAssetClient,
-    Address, Env, String, Symbol,
+    Address, Env, String, Symbol, Vec,
 };
 
 use crate::{TipContract, TipContractClient};
@@ -48,7 +48,7 @@ impl FuzzEnv {
         let token_id = token_contract.address();
 
         let sac = StellarAssetClient::new(&env, &token_id);
-        sac.mint(&admin, &1_000_000_000_000_000_000); // large amount of tokens
+        sac.mint(&admin, &1_000_000_000_000_000_000);
 
         let t = FuzzEnv { env, contract_id, admin, fee_recipient, token_id };
         t.tip_client().init(&t.admin, &t.fee_recipient, &fee_bps, &0u32, &0u32, &0i128);
@@ -71,6 +71,66 @@ impl FuzzEnv {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10000))]
 
+    // -------------------------------------------------------------------
+    // Issue #95 — full token-conservation invariant
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_token_conservation_invariant(
+        fee_bps in 0..10_000u32,
+        num_creators in 1usize..6,
+        ops in prop::collection::vec(
+            (0..10usize, 0..3u8, 1i128..100_000_000i128),
+            1..6,
+        ),
+    ) {
+        let t = FuzzEnv::new(fee_bps);
+
+        let syms = [
+            Symbol::new(&t.env, "a"),
+            Symbol::new(&t.env, "b"),
+            Symbol::new(&t.env, "c"),
+            Symbol::new(&t.env, "d"),
+            Symbol::new(&t.env, "e"),
+        ];
+        let display = s(&t.env, "C");
+        let mut creators = Vec::new(&t.env);
+        for i in 0..num_creators {
+            let c = Address::generate(&t.env);
+            t.tip_client().register(&c, &syms[i], &display, &s(&t.env, ""));
+            creators.push_back(c);
+        }
+
+        for (ci_raw, is_wd, amt) in &ops {
+            let ci = ci_raw % (creators.len() as usize);
+            let creator = creators.get(ci as u32).unwrap();
+
+            if *is_wd == 0 {
+                let tipper = Address::generate(&t.env);
+                t.stellar_client().mint(&tipper, amt);
+                t.tip_client().tip(&tipper, &creator, &t.token_id, amt, &s(&t.env, ""));
+            } else {
+                let bal = t.tip_client().get_balance(&creator, &t.token_id);
+                if bal > 0 {
+                    let wd = (bal * amt / 100_000_000i128).max(1);
+                    t.tip_client().withdraw(&creator, &t.token_id, &wd);
+                }
+            }
+        }
+
+        let contract_balance = t.token_client().balance(&t.contract_id);
+        let mut sum_internal: i128 = 0;
+        for i in 0..creators.len() {
+            let c = creators.get(i as u32).unwrap();
+            sum_internal += t.tip_client().get_balance(&c, &t.token_id);
+        }
+
+        prop_assert_eq!(
+            contract_balance, sum_internal,
+            "conservation violated: contract balance mismatch for fee_bps setting"
+        );
+    }
+
     #[test]
     fn test_tip_balance_invariant(
         amount in 1..1_000_000_000_000i128,
@@ -86,22 +146,17 @@ proptest! {
 
         let fee_recipient_balance_before = t.token_client().balance(&t.fee_recipient);
 
-        // Tip
         t.tip_client().tip(&tipper, &creator, &t.token_id, &amount, &s(&t.env, "Thanks!"));
 
-        // Verifications
         let fee = (amount * (fee_bps as i128)) / 10000;
         let expected_creator_balance = amount - fee;
 
-        // Verify internal creator balance
         let internal_balance = t.tip_client().get_balance(&creator, &t.token_id);
         prop_assert_eq!(internal_balance, expected_creator_balance);
 
-        // Verify fee recipient received the fee
         let fee_recipient_balance_after = t.token_client().balance(&t.fee_recipient);
         prop_assert_eq!(fee_recipient_balance_after - fee_recipient_balance_before, fee);
 
-        // Verify contract token balance
         let contract_balance = t.token_client().balance(&t.contract_id);
         prop_assert_eq!(contract_balance, expected_creator_balance);
     }
