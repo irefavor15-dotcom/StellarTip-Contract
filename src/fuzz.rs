@@ -100,7 +100,7 @@ proptest! {
         prop_assert_eq!(
             t.tip_client().get_balance(&creator, &t.token_id),
             amount,
-            "amount={amount}: balance mismatch after tip"
+            "amount boundary: balance mismatch after tip"
         );
     }
 
