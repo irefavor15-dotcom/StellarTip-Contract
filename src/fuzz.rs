@@ -86,7 +86,12 @@ proptest! {
     /// and the `BelowMinimum` guard is never triggered.  `BelowMinimum`
     /// coverage comes from `test_tip_balance_invariant` which exercises the
     /// full `fee_bps` range alongside amounts ≤ 10^12.
+    ///
+    /// The per-test config caps cases at 1_000 — enough to meet the #90
+    /// acceptance criteria (≥ 1_000 cases) while keeping CI run-times
+    /// reasonable.
     #[test]
+    #[proptest_config(ProptestConfig { cases: 1_000, .. ProptestConfig::default() })]
     fn test_i128_boundary_amount_no_overflow(
         amount in prop_oneof![
             9 => prop::num::i128::ANY,
