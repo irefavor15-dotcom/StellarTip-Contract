@@ -79,35 +79,23 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(1000))]
 
     /// Verify that `tip()` never suffers a raw arithmetic overflow for
-    /// large positive `i128` amounts.  Boundary values (i128::MAX,
-    /// u64::MAX as i128, 1) are drawn with higher probability via
-    /// `prop_oneof!` so the fuzzer hits them frequently.
+    /// positive `i128` amounts up to 10^12.  Values are drawn from the
+    /// full `i128` range but `prop_assume!` restricts to the mintable
+    /// band — boundary values like `i128::MAX` that can't be minted are
+    /// silently skipped.
     ///
-    /// Uses `prop_assume!` to restrict to amounts ≤ 10^12 that we can
-    /// actually mint — avoids the need for `catch_unwind` which requires
-    /// std under the crate-level `#![no_std]`.
-    ///
-    /// Invalid-amount coverage (≤ 0) is provided by `test_tip_zero_amount_fails`
-    /// in `src/test.rs`.  `BelowMinimum` coverage comes from
-    /// `test_tip_balance_invariant` below which exercises the full
-    /// `fee_bps` range alongside amounts ≤ 10^12.
+    /// Invalid-amount coverage (≤ 0) is provided by
+    /// `test_tip_zero_amount_fails` in `src/test.rs`.  `BelowMinimum`
+    /// coverage comes from `test_tip_balance_invariant` below.
     #[test]
     fn test_i128_boundary_amount_no_overflow(
         amount in prop_oneof![
-            9 => prop::num::i128::ANY,
-            1 => Just(i128::MAX),
-            1 => Just(i128::MAX - 1),
-            1 => Just(i128::MIN),
-            1 => Just(i128::MIN + 1),
-            1 => Just(0i128),
-            1 => Just(-1i128),
+            9 => 1i128..=1_000_000_000_000i128,
             1 => Just(1i128),
-            1 => Just(u64::MAX as i128),
+            1 => Just(1_000_000_000_000i128),
         ],
     ) {
         // Only test amounts we can mint and tip successfully.
-        // Non-positive and unmintably-huge amounts are skipped —
-        // coverage for those paths lives in other tests.
         prop_assume!(amount > 0 && amount <= 1_000_000_000_000i128);
 
         let t = FuzzEnv::new(0); // zero fee — no fee-computation overflow possible
