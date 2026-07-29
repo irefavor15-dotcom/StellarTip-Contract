@@ -68,12 +68,15 @@ impl FuzzEnv {
     }
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(10000))]
+// -----------------------------------------------------------------------
+// Issue #95 — full token-conservation invariant
+// -----------------------------------------------------------------------
+//
+// Separate block with a lower case count because each case performs up to
+// 19 contract calls and CI runners are resource-constrained.
 
-    // -------------------------------------------------------------------
-    // Issue #95 — full token-conservation invariant
-    // -------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
 
     /// After an arbitrary sequence of `tip` and `withdraw` operations the
     /// contract's on-chain token balance must exactly equal the sum of every
@@ -93,11 +96,10 @@ proptest! {
     /// `is_withdraw > 0` means withdraw that fraction of the current balance
     /// (clamped to ≥ 1).
     ///
-    /// This test runs fewer cases (500) than the block default (10 000)
-    /// because each case performs up to 19 contract calls and CI runners
-    /// are resource-constrained.
+    /// Uses Soroban's `try_tip()` / `try_withdraw()` methods so failed
+    /// operations (cap exceeded, insufficient balance) return `Err` instead
+    /// of panicking — this plays correctly with the proptest runner.
     #[test]
-    #[proptest_config(ProptestConfig { cases: 500, .. ProptestConfig::default() })]
     fn test_token_conservation_invariant(
         fee_bps in 0..10_000u32,
         num_creators in 1usize..6,
@@ -127,18 +129,16 @@ proptest! {
             let creator = &creators[ci];
 
             if *is_wd == 0 {
-                // Tip.
+                // Tip: try_tip returns Result — failure is non-fatal.
                 let tipper = Address::generate(&t.env);
                 t.stellar_client().mint(&tipper, amt);
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    t.tip_client().tip(
-                        &tipper,
-                        creator,
-                        &t.token_id,
-                        amt,
-                        &s(&t.env, ""),
-                    );
-                }));
+                let _ = t.tip_client().try_tip(
+                    &tipper,
+                    creator,
+                    &t.token_id,
+                    amt,
+                    &s(&t.env, ""),
+                );
             } else {
                 // Withdraw: take a fraction of current balance so the
                 // amount stays within bounds.
@@ -147,9 +147,7 @@ proptest! {
                     // Use `amt` as a fraction (amt / 100_000_000) of `bal`,
                     // with a floor of 1 so the withdraw is never zero.
                     let wd = (bal * amt / 100_000_000i128).max(1);
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        t.tip_client().withdraw(creator, &t.token_id, &wd);
-                    }));
+                    let _ = t.tip_client().try_withdraw(creator, &t.token_id, &wd);
                 }
             }
         }
@@ -169,6 +167,14 @@ proptest! {
              creators={num_creators})"
         );
     }
+}
+
+// -----------------------------------------------------------------------
+// Original fuzz tests (unchanged)
+// -----------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10000))]
 
     #[test]
     fn test_tip_balance_invariant(
