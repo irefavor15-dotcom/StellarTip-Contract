@@ -84,9 +84,11 @@ proptest! {
     /// them frequently, while the rest of the i128 space is covered by random
     /// sampling.
     ///
-    /// Uses `try_tip()` (returned by the Soroban-generated client) instead
-    /// of `catch_unwind` — `try_tip()` returns `Result` rather than
-    /// panicking, which plays perfectly with the proptest runner.
+    /// Uses `std::panic::catch_unwind` to trap expected panics from
+    /// `panic_with_error!` (InvalidAmount for non-positive amounts,
+    /// TransferFailed when the tipper has no tokens).  The test is in its
+    /// own `proptest!` block with a lower case count so the catch_unwind
+    /// overhead doesn't affect the 10 000-case tests.
     ///
     /// The test uses **zero fee** (fee_bps = 0) and **zero minimum**
     /// (`min_tip_amount = 0`) so the fee-computation path cannot overflow
@@ -119,30 +121,34 @@ proptest! {
 
         let tipper = Address::generate(&t.env);
 
-        // `try_tip` returns `Result` — no panic, no catch_unwind needed.
-        let result = t.tip_client().try_tip(
-            &tipper,
-            &creator,
-            &t.token_id,
-            &amount,
-            &s(&t.env, "boundary"),
-        );
-
-        if amount <= 0 {
-            // The amount guard is the very first check in tip().
-            // Every non-positive amount MUST surface an error rather
-            // than a raw host overflow.
-            prop_assert!(result.is_err(), "amount={amount}: expected error for non-positive");
-        } else if amount <= 1_000_000_000_000i128 {
-            // Mintable range — mint and verify success.
-            t.stellar_client().mint(&tipper, &amount);
-            let re = t.tip_client().try_tip(
+        // catch_unwind traps the panic_with_error! from the Soroban
+        // host so the proptest runner can inspect the outcome.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            t.tip_client().tip(
                 &tipper,
                 &creator,
                 &t.token_id,
                 &amount,
-                &s(&t.env, "ok"),
+                &s(&t.env, "boundary"),
             );
+        }));
+
+        if amount <= 0 {
+            // Every non-positive amount MUST surface InvalidAmount (#6)
+            // rather than a raw host overflow.
+            prop_assert!(result.is_err(), "amount={amount}: expected InvalidAmount panic");
+        } else if amount <= 1_000_000_000_000i128 {
+            // Mintable range — mint and verify success.
+            t.stellar_client().mint(&tipper, &amount);
+            let re = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                t.tip_client().tip(
+                    &tipper,
+                    &creator,
+                    &t.token_id,
+                    &amount,
+                    &s(&t.env, "ok"),
+                );
+            }));
             prop_assert!(re.is_ok(), "amount={amount}: tip with minted balance should succeed");
             prop_assert_eq!(
                 t.tip_client().get_balance(&creator, &t.token_id),
