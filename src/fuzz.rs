@@ -114,7 +114,7 @@ proptest! {
         let t = FuzzEnv::new(fee_bps);
 
         // Create creators.
-        let mut creators: Vec<Address> = Vec::new();
+        let mut creators: std::vec::Vec<Address> = std::vec::Vec::new();
         for i in 0..num_creators {
             let c = Address::generate(&t.env);
             // Build short symbol from a static list — avoids std::format!
