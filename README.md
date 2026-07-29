@@ -94,6 +94,14 @@ Developers integrating against or auditing the contract should consult:
   rustdoc HTML lives at `target/doc/stellar_tip/index.html` after running
   `make doc`.
 
+### For Indexers
+
+Off-chain indexers and wallets that consume StellarTip events should consult
+[`docs/indexer-event-schema.md`](docs/indexer-event-schema.md).  It catalogues
+all 14 contract-emitted events with topic-filtering query strings, payload
+shapes, ordering guarantees, rollback semantics, and the trust model (emitter
+address as ground truth).
+
 ### Prerequisites
 
 - Rust (nightly) – <https://rustup.rs>
@@ -183,11 +191,15 @@ Tip flow:
 ├── Cargo.toml                  # Rust / Soroban dependencies
 ├── src/
 │   ├── lib.rs                  # Contract logic
-│   └── test.rs                 # Unit tests (34 tests)
+│   ├── test.rs                 # Unit tests
+│   ├── fuzz.rs                 # Property-based fuzz tests
+│   └── fixtures.rs             # Test-only token fixtures
 ├── docs/
 │   ├── ADMIN_RUNBOOK.md        # Operator response procedures
 │   ├── API_REFERENCE.md        # Curated public-method reference
 │   ├── ARCHITECTURE.md         # Storage, lifecycle, and invariants
+│   ├── events_catalog.md       # All 14 events with topic/payload shapes
+│   ├── indexer-event-schema.md # Indexer-facing event schema
 │   ├── static-analysis-findings.md  # Known static analysis findings
 │   └── tutorial.md             # End-to-end testnet walkthrough
 ├── .github/
