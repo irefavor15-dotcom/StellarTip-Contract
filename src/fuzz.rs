@@ -80,24 +80,18 @@ proptest! {
 
     /// Verify that `tip()` never suffers a raw arithmetic overflow for
     /// positive `i128` amounts up to 10^12.  Values are drawn from the
-    /// full `i128` range but `prop_assume!` restricts to the mintable
-    /// band — boundary values like `i128::MAX` that can't be minted are
-    /// silently skipped.
-    ///
-    /// Invalid-amount coverage (≤ 0) is provided by
+    /// Values are drawn from `1..10^12` — the range we can actually mint
+    /// and tip.  Invalid-amount coverage (≤ 0) is provided by
     /// `test_tip_zero_amount_fails` in `src/test.rs`.  `BelowMinimum`
     /// coverage comes from `test_tip_balance_invariant` below.
     #[test]
     fn test_i128_boundary_amount_no_overflow(
         amount in prop_oneof![
-            9 => 1i128..=1_000_000_000_000i128,
+            9 => 1i128..1_000_000_000_001i128,
             1 => Just(1i128),
             1 => Just(1_000_000_000_000i128),
         ],
     ) {
-        // Only test amounts we can mint and tip successfully.
-        prop_assume!(amount > 0 && amount <= 1_000_000_000_000i128);
-
         let t = FuzzEnv::new(0); // zero fee — no fee-computation overflow possible
 
         let creator = Address::generate(&t.env);
