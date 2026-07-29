@@ -5,7 +5,7 @@ use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token,
     token::StellarAssetClient,
-    vec, Address, Env, String, Symbol, Vec,
+    Address, Env, String, Symbol, Vec,
 };
 
 use crate::{TipContract, TipContractClient};
